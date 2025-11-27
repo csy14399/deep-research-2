@@ -84,15 +84,19 @@ def _build_common_tools(
         web_search = _deep_merge(web_search, web_search_options)
     tools.append(web_search)
 
-    file_search: Dict[str, Any] = {"type": "file_search", "max_num_results": 30}
-    if vector_store_ids:
-        file_search["vector_store_ids"] = vector_store_ids
+    resolved_vector_ids = vector_store_ids
     if file_search_options:
-        file_search = _deep_merge(file_search, file_search_options)
-    tools.append(file_search)
+        resolved_vector_ids = file_search_options.get("vector_store_ids", vector_store_ids)
+
+    if resolved_vector_ids:
+        file_search: Dict[str, Any] = {"type": "file_search", "max_num_results": 30}
+        file_search["vector_store_ids"] = resolved_vector_ids
+        if file_search_options:
+            file_search = _deep_merge(file_search, file_search_options)
+        tools.append(file_search)
 
     if include_code_interpreter:
-        tools.append({"type": "code_interpreter"})
+        tools.append({"type": "code_interpreter", "container": {"type": "auto"}})
     if include_image_generation:
         tools.append({"type": "image_generation"})
 
@@ -132,10 +136,17 @@ def build_deep_research_payload(
 
     context = context or RequestContext()
     resolved_max_output_tokens = max_output_tokens or context.max_output_tokens or 100_000
+    if reasoning is None:
+        reasoning_config: Dict[str, Any] = {
+            "effort": "medium" if resolved_max_output_tokens <= 4_000 else reasoning_effort
+        }
+    else:
+        reasoning_config = reasoning
+
     payload: Dict[str, Any] = {
         "model": model,
         "instructions": instructions,
-        "reasoning": reasoning or {"effort": reasoning_effort},
+        "reasoning": reasoning_config,
         "text": text or {"verbosity": text_verbosity},
         "max_output_tokens": resolved_max_output_tokens,
         "tools": tools
@@ -238,6 +249,12 @@ def _resolve_api_key(api_key: Optional[str]) -> str:
     return resolved
 
 
+def _resolve_header_env(name: str, fallback: Optional[str]) -> Optional[str]:
+    """Return a header value from explicit input or environment."""
+
+    return fallback or os.getenv(name)
+
+
 def _resolve_api_url(api_url: Optional[str]) -> str:
     """Return a full Responses endpoint, defaulting to OPENAI_BASE_URL when set."""
 
@@ -253,6 +270,8 @@ def send_response_request(
     *,
     api_key: Optional[str] = None,
     api_url: Optional[str] = None,
+    organization: Optional[str] = None,
+    project: Optional[str] = None,
     timeout: int = 120,
 ) -> Dict[str, Any]:
     """Sends a request to the OpenAI Responses API and returns JSON.
@@ -266,9 +285,48 @@ def send_response_request(
         "Authorization": f"Bearer {resolved_key}",
         "Content-Type": "application/json",
     }
+    resolved_org = _resolve_header_env("OPENAI_ORG_ID", organization)
+    if resolved_org:
+        headers["OpenAI-Organization"] = resolved_org
+
+    resolved_project = _resolve_header_env("OPENAI_PROJECT", project)
+    if resolved_project:
+        headers["OpenAI-Project"] = resolved_project
 
     response = requests.post(url, headers=headers, json=payload, timeout=timeout)
-    response.raise_for_status()
+
+    detail: str = ""
+    try:
+        detail = response.json().get("error", {}).get("message", "")
+    except Exception:
+        detail = response.text
+
+    if response.status_code == 401:
+        header_summary_parts = []
+        if resolved_org:
+            header_summary_parts.append(f"OpenAI-Organization={resolved_org}")
+        if resolved_project:
+            header_summary_parts.append(f"OpenAI-Project={resolved_project}")
+        header_summary = ", ".join(header_summary_parts) if header_summary_parts else "no org/project headers"
+
+        message = (
+            f"OpenAI returned 401 Unauthorized from {url}. Confirm OPENAI_API_KEY is valid and "
+            "has access to the Responses API (keys that work for other endpoints may be scoped differently), "
+            "set OPENAI_BASE_URL if using a proxy, and provide OpenAI-Organization / OpenAI-Project headers when "
+            f"your key is scoped to a specific project (currently {header_summary})."
+        )
+        if detail:
+            message = f"{message} Provider message: {detail}"
+        raise requests.HTTPError(message, response=response)
+
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        message = f"OpenAI returned {response.status_code} from {url}."
+        if detail:
+            message = f"{message} Provider message: {detail}"
+        raise requests.HTTPError(message, response=response) from exc
+
     return response.json()
 
 
@@ -278,8 +336,17 @@ def run_deep_research(prompt: str, *, context: Optional[RequestContext] = None, 
     api_key = kwargs.pop("api_key", None)
     api_url = kwargs.pop("api_url", None)
     timeout = kwargs.pop("timeout", 120)
+    organization = kwargs.pop("organization", None)
+    project = kwargs.pop("project", None)
     payload = build_deep_research_payload(prompt, context=context, **kwargs)
-    return send_response_request(payload, api_key=api_key, api_url=api_url, timeout=timeout)
+    return send_response_request(
+        payload,
+        api_key=api_key,
+        api_url=api_url,
+        organization=organization,
+        project=project,
+        timeout=timeout,
+    )
 
 
 def run_brainstorm(prompt: str, *, context: Optional[RequestContext] = None, **kwargs: Any) -> Dict[str, Any]:
@@ -288,8 +355,17 @@ def run_brainstorm(prompt: str, *, context: Optional[RequestContext] = None, **k
     api_key = kwargs.pop("api_key", None)
     api_url = kwargs.pop("api_url", None)
     timeout = kwargs.pop("timeout", 120)
+    organization = kwargs.pop("organization", None)
+    project = kwargs.pop("project", None)
     payload = build_brainstorm_payload(prompt, context=context, **kwargs)
-    return send_response_request(payload, api_key=api_key, api_url=api_url, timeout=timeout)
+    return send_response_request(
+        payload,
+        api_key=api_key,
+        api_url=api_url,
+        organization=organization,
+        project=project,
+        timeout=timeout,
+    )
 
 
 def pretty_print_payload(payload: Dict[str, Any]) -> str:

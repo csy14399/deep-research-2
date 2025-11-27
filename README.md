@@ -18,7 +18,10 @@ pip install -r requirements.txt
 ## Usage
 
 Run either mode from the command line. Prompts can be supplied directly
-or loaded from a file with the `@path` shorthand.
+or loaded from a file with the `@path` shorthand. File search is included
+only when you provide vector store IDs via `--vector-store` (or
+`RequestContext.vector_store_ids`); otherwise it is omitted to avoid
+`vector_store_ids` validation errors from the Responses API.
 
 ```bash
 # High-rigor research with large output budget
@@ -41,6 +44,30 @@ request:
 ```bash
 python -m deep_research.cli "Explain NVIDIA competitive moats" --dry-run
 ```
+
+### Run a live, internet-backed research request
+
+Provide a valid OpenAI key (via `OPENAI_API_KEY` or `--api-key`) to let the
+Responses API perform real-time web searches and calculations. For
+example:
+
+```bash
+export OPENAI_API_KEY=sk-...
+python -m deep_research.cli "列举本周全球 AI 监管的新动态并给出来源链接" \
+  --mode research \
+  --max-output-tokens 12000 \
+  --conversation-id live_demo
+```
+
+The CLI will exit with a clear error if a key is missing when attempting a
+live call. If you see a `401 Unauthorized` response, double-check that your
+key is valid, enabled for the Responses API, and routed through the correct
+`OPENAI_BASE_URL` when using a proxy. Some organization-scoped keys require
+project scoping to authenticate correctly—pass `--project <project_id>` (or
+set `OPENAI_PROJECT`) and `--organization <org_id>` (or `OPENAI_ORG_ID`) if
+you receive 401s while the key works elsewhere. Keys that succeed for Chat
+Completions may still be blocked from the Responses API; confirm your
+account has the proper entitlement if authentication keeps failing.
 
 ### Adjust every parameter
 
@@ -69,6 +96,9 @@ Environment variables:
 - `OPENAI_BASE_URL`: optional override of the API endpoint. Set to
   `https://api.bltcy.ai/v1` to route through Plato AI's proxy; the
   `/responses` path is appended automatically when omitted.
+- `OPENAI_ORG_ID`: optional organization ID header if your key is scoped to a
+  specific org.
+- `OPENAI_PROJECT`: optional project ID header; required for some keys.
 
 ## Library API
 

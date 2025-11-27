@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from typing import Any, List, Optional
 
@@ -56,6 +57,8 @@ def _parse_arguments(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--no-image-generation", dest="include_image_generation", action="store_false", default=True)
     parser.add_argument("--api-key", dest="api_key", help="OpenAI API key (defaults to OPENAI_API_KEY env variable).")
     parser.add_argument("--api-url", dest="api_url", help="Override the API endpoint (defaults to OPENAI_BASE_URL or official URL).")
+    parser.add_argument("--organization", dest="organization", help="OpenAI organization ID (defaults to OPENAI_ORG_ID env variable).")
+    parser.add_argument("--project", dest="project", help="OpenAI project ID (defaults to OPENAI_PROJECT env variable).")
     parser.add_argument("--dry-run", action="store_true", help="Print the payload without sending the request.")
     return parser.parse_args(argv)
 
@@ -148,7 +151,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(pretty_print_payload(payload))
         return 0
 
-    response = send_response_request(payload, api_key=args.api_key, api_url=args.api_url)
+    if not (args.api_key or os.getenv("OPENAI_API_KEY")):
+        sys.stderr.write("Error: provide an OpenAI API key via --api-key or OPENAI_API_KEY to run a live request.\n")
+        return 2
+
+    response = send_response_request(
+        payload,
+        api_key=args.api_key,
+        api_url=args.api_url,
+        organization=args.organization,
+        project=args.project,
+    )
     print(json.dumps(response, ensure_ascii=False, indent=2))
     return 0
 
