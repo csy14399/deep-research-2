@@ -12,8 +12,17 @@ workflows:
 ## Installation
 
 ```bash
-pip install -r requirements.txt
+pip install -e .
+
+# Optional: install testing tools
+pip install -e .[dev]
 ```
+
+> Tip for Windows users: if you see `ModuleNotFoundError: No module named 'deep_research'`
+> when running `python -m deep_research.cli`, make sure the project is installed in
+> your virtual environment via `pip install -e .`. Installing only the dependencies
+> from `requirements.txt` will not place the `deep_research` package on your
+> `PYTHONPATH`.
 
 ## Usage
 
