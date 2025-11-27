@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import pytest
+import requests
 
 from deep_research.client import (
     RequestContext,
@@ -10,6 +11,7 @@ from deep_research.client import (
     build_deep_research_payload,
     pretty_print_payload,
     run_deep_research,
+    run_brainstorm,
     send_response_request,
 )
 
@@ -30,6 +32,21 @@ def test_build_deep_research_payload_includes_high_reasoning_and_tools():
     file_search = payload["tools"][1]
     assert file_search["vector_store_ids"] == ["vs1", "vs2"]
     assert file_search["max_num_results"] == 30
+    assert payload["tools"][2]["container"] == {"type": "auto"}
+
+
+def test_build_deep_research_payload_skips_file_search_when_no_vector_store():
+    payload = build_deep_research_payload("test prompt", context=RequestContext())
+
+    tool_types = [tool["type"] for tool in payload["tools"]]
+    assert tool_types == ["web_search", "code_interpreter", "image_generation"]
+
+
+def test_small_output_budget_dials_down_reasoning_effort():
+    payload = build_deep_research_payload("short", context=RequestContext(max_output_tokens=2000))
+
+    assert payload["max_output_tokens"] == 2000
+    assert payload["reasoning"] == {"effort": "medium"}
 
 
 def test_build_brainstorm_payload_enables_sampling_defaults():
@@ -60,6 +77,21 @@ def test_common_tools_allow_overrides_and_toggles():
 
     assert payload["tools"][0]["user_location"] == {"country": "CN"}
     assert payload["tools"][1]["max_num_results"] == 5
+
+
+def test_file_search_can_be_opted_in_via_options_without_context_vector_store():
+    context = RequestContext(
+        file_search_options={"vector_store_ids": ["vs_opt_in"], "max_num_results": 10}
+    )
+
+    payload = build_deep_research_payload("prompt", context=context)
+
+    tool_types = [tool["type"] for tool in payload["tools"]]
+    assert tool_types[0] == "web_search"
+    assert "file_search" in tool_types
+    file_search = next(tool for tool in payload["tools"] if tool["type"] == "file_search")
+    assert file_search["vector_store_ids"] == ["vs_opt_in"]
+    assert file_search["max_num_results"] == 10
 
 
 def test_extra_options_deep_merge_nested_fields():
@@ -115,6 +147,23 @@ def test_send_response_request_uses_environment_api_key(monkeypatch):
     assert headers["Authorization"] == "Bearer env-key"
 
 
+def test_send_response_request_includes_org_and_project_headers(monkeypatch):
+    payload = {"model": "x", "input": []}
+    monkeypatch.setenv("OPENAI_API_KEY", "env-key")
+    monkeypatch.setenv("OPENAI_ORG_ID", "org_123")
+    monkeypatch.setenv("OPENAI_PROJECT", "proj_abc")
+    fake_response = SimpleNamespace(status_code=200, json=lambda: {"ok": True})
+    fake_response.raise_for_status = lambda: None
+
+    with mock.patch("requests.post", return_value=fake_response) as mock_post:
+        send_response_request(payload, organization="org_cli", project="proj_cli")
+
+    headers = mock_post.call_args.kwargs["headers"]
+    # Explicit CLI values should win over env vars.
+    assert headers["OpenAI-Organization"] == "org_cli"
+    assert headers["OpenAI-Project"] == "proj_cli"
+
+
 def test_send_response_request_appends_responses_path(monkeypatch):
     payload = {"model": "x", "input": []}
     monkeypatch.setenv("OPENAI_API_KEY", "env-key")
@@ -148,12 +197,108 @@ def test_send_response_request_raises_without_api_key(monkeypatch):
         send_response_request({"model": "x", "input": []}, api_url="https://example.com")
 
 
+def test_send_response_request_surface_endpoint_and_headers_on_401(monkeypatch):
+    payload = {"model": "x", "input": []}
+    monkeypatch.setenv("OPENAI_API_KEY", "env-key")
+
+    class FakeResponse:
+        status_code = 401
+        text = "unauthorized"
+
+        def json(self):
+            return {"error": {"message": "bad key"}}
+
+    with mock.patch("requests.post", return_value=FakeResponse()):
+        with pytest.raises(requests.HTTPError) as excinfo:
+            send_response_request(
+                payload,
+                api_url="https://proxy.example.com/v1",
+                organization="org_cli",
+                project="proj_cli",
+            )
+
+    message = str(excinfo.value)
+    assert "https://proxy.example.com/v1/responses" in message
+    assert "OpenAI-Organization=org_cli" in message
+    assert "OpenAI-Project=proj_cli" in message
+    assert "bad key" in message
+
+
+def test_send_response_request_notes_missing_headers_on_401(monkeypatch):
+    payload = {"model": "x", "input": []}
+    monkeypatch.setenv("OPENAI_API_KEY", "env-key")
+
+    class FakeResponse:
+        status_code = 401
+        text = "unauthorized"
+
+        def json(self):
+            return {"error": {"message": "missing project"}}
+
+    with mock.patch("requests.post", return_value=FakeResponse()):
+        with pytest.raises(requests.HTTPError) as excinfo:
+            send_response_request(payload, api_url="https://api.openai.com/v1")
+
+    message = str(excinfo.value)
+    assert "https://api.openai.com/v1/responses" in message
+    assert "no org/project headers" in message
+    assert "missing project" in message
+
+
+def test_send_response_request_surfaces_provider_message_on_other_errors(monkeypatch):
+    payload = {"model": "x", "input": []}
+    monkeypatch.setenv("OPENAI_API_KEY", "env-key")
+
+    class FakeResponse:
+        status_code = 400
+        text = "bad request"
+
+        def json(self):
+            return {"error": {"message": "missing tools"}}
+
+        def raise_for_status(self):
+            raise requests.HTTPError("boom", response=self)
+
+    with mock.patch("requests.post", return_value=FakeResponse()):
+        with pytest.raises(requests.HTTPError) as excinfo:
+            send_response_request(payload, api_url="https://api.openai.com/v1")
+
+    message = str(excinfo.value)
+    assert "https://api.openai.com/v1/responses" in message
+    assert "400" in message
+    assert "missing tools" in message
+
+
 def test_run_deep_research_forwards_timeout_and_api_values(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "env-key")
 
     with mock.patch("deep_research.client.send_response_request", return_value={"ok": True}) as mock_send:
-        run_deep_research("prompt", api_key="explicit", api_url="https://example.com", timeout=5)
+        run_deep_research(
+            "prompt",
+            api_key="explicit",
+            api_url="https://example.com",
+            timeout=5,
+            organization="org_cli",
+            project="proj_cli",
+        )
 
     assert mock_send.call_args.kwargs["api_key"] == "explicit"
     assert mock_send.call_args.kwargs["api_url"] == "https://example.com"
     assert mock_send.call_args.kwargs["timeout"] == 5
+    assert mock_send.call_args.kwargs["organization"] == "org_cli"
+    assert mock_send.call_args.kwargs["project"] == "proj_cli"
+
+
+def test_run_brainstorm_forwards_org_and_project(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "env-key")
+
+    with mock.patch("deep_research.client.send_response_request", return_value={"ok": True}) as mock_send:
+        run_brainstorm(
+            "prompt",
+            api_key="explicit",
+            organization="org_cli",
+            project="proj_cli",
+        )
+
+    assert mock_send.call_args.kwargs["organization"] == "org_cli"
+    assert mock_send.call_args.kwargs["project"] == "proj_cli"
